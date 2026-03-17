@@ -1,153 +1,77 @@
-const express = require('express');
-const path = require('path');
-const fs = require('fs');
-const { customAlphabet } = require('nanoid');
-
-const randomCode = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 6);
-const redis = require('./redis');
+const express = require("express");
+const path = require("path");
+const fs = require("fs");
+const redis = require("./redis");
 
 const app = express();
+const PORT = 3000;
+
+// middleware
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+// serve static files from www
+app.use(express.static(path.join(__dirname, "../www")));
 
-// Read student ID from file
-let studentId = 'NOT_SET';
+// read student id
+let studentId = "unknown";
 try {
-  const studentIdPath = process.env.STUDENT_ID_FILE || path.join(__dirname, '../student_id.txt');
-  if (fs.existsSync(studentIdPath)) {
-    studentId = fs.readFileSync(studentIdPath, 'utf-8').trim();
-  }
+  studentId = fs
+    .readFileSync(path.join(__dirname, "../student_id.txt"), "utf8")
+    .trim();
 } catch (err) {
-  console.error('Failed to read student ID:', err.message);
+  console.log("student_id.txt not found");
 }
 
-// Read build time
-let buildTime = 'NOT_SET';
-try {
-  const buildTimePath = process.env.BUILD_TIME_FILE || path.join(__dirname, '../build_time.txt');
-  if (fs.existsSync(buildTimePath)) {
-    buildTime = fs.readFileSync(buildTimePath, 'utf-8').trim();
-  } else if (process.env.BUILD_TIME) {
-    buildTime = process.env.BUILD_TIME;
-  }
-} catch (err) {
-  buildTime = process.env.BUILD_TIME || 'NOT_SET';
-}
+// build time from docker / CI
+const buildTime = process.env.BUILD_TIME || "local-build";
 
-const api = express.Router();
-
-/* -------------------------
-   CREATE SHORT URL
--------------------------- */
-
-api.post('/shorten', async (req, res) => {
-  const { url, customCode } = req.body;
-
-  if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) {
-    return res.status(400).json({ error: 'Invalid URL' });
-  }
-
-  const code = customCode
-    ? customCode.toLowerCase()
-    : randomCode(6).toLowerCase();
-
-  await redis.set(code, url);
-
-  return res.status(200).json({
-    code,
-    short: `/${code}`
+// API: show info
+app.get("/info", (req, res) => {
+  res.json({
+    student_id: studentId,
+    build_time: buildTime
   });
 });
 
-/* -------------------------
-   LIST URLS
--------------------------- */
-
-api.get('/urls', async (req, res) => {
-  const entries = await redis.list();
-  return res.status(200).json(entries);
-});
-
-/* -------------------------
-   TOGGLE ENABLE / DISABLE
--------------------------- */
-
-api.patch('/:code/toggle', async (req, res) => {
-  const enabled = await redis.toggle(req.params.code);
-
-  if (enabled === null) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-
-  return res.status(200).json({
-    code: req.params.code,
-    enabled
-  });
-});
-
-/* -------------------------
-   DELETE
--------------------------- */
-
-api.delete('/:code', async (req, res) => {
-  const deleted = await redis.del(req.params.code);
-
-  if (!deleted) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-
-  return res.status(200).json({ deleted: req.params.code });
-});
-
-/* -------------------------
-   HEALTH CHECK
--------------------------- */
-
-api.get('/health', (req, res) => {
-  return res.status(200).json({ status: 'ok' });
-});
-
-/* -------------------------
-   INFO
--------------------------- */
-
-api.get('/info', (req, res) => {
-  return res.status(200).json({
-    studentId,
-    buildTime
-  });
-});
-
-app.use('/api', api);
-app.use('/ui', express.static(path.join(__dirname, '../www')));
-
-/* -------------------------
-   REDIRECT SHORT URL
--------------------------- */
-
-app.get('/:code', async (req, res) => {
-  const code = req.params.code;
-
-  const url = await redis.get(code);
+// shorten url
+app.post("/shorten", async (req, res) => {
+  const { url, code } = req.body;
 
   if (!url) {
-    return res.status(404).json({ error: 'Not found' });
+    return res.status(400).json({ error: "URL is required" });
   }
 
-  await redis.incrementClick(code);
+  const shortCode = code || Math.random().toString(36).substring(2, 8);
 
-  return res.redirect(302, url);
+  try {
+    await redis.set(shortCode, url);
+    res.json({
+      short_code: shortCode,
+      short_url: `${req.protocol}://${req.get("host")}/${shortCode}`
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Redis error" });
+  }
 });
 
-/* -------------------------
-   START SERVER
--------------------------- */
+// redirect short url
+app.get("/:code", async (req, res) => {
+  const { code } = req.params;
 
-if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-  });
-}
+  try {
+    const url = await redis.get(code);
 
-module.exports = app;
+    if (!url) {
+      return res.status(404).send("Not found");
+    }
+
+    res.redirect(url);
+  } catch (err) {
+    res.status(500).send("Redis error");
+  }
+});
+
+// start server
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
